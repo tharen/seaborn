@@ -5,6 +5,8 @@ import numpy as np
 from scipy import stats
 import pandas as pd
 from pandas.core.series import remove_na
+from pandas.types.missing import notnull
+from pandas.core.common import _values_from_object
 import matplotlib as mpl
 from matplotlib.collections import PatchCollection
 import matplotlib.patches as Patches
@@ -25,13 +27,21 @@ __all__ = ["boxplot", "violinplot", "stripplot", "swarmplot", "lvplot",
            "pointplot", "barplot", "countplot", "factorplot"]
 
 
+def remove_na_wgts(series, weights):
+    """
+    Return series of values and paired weights where values are true/non-NaN.
+    """
+    m = notnull(_values_from_object(series))
+    return (series[m], weights[m])
+
+
 class _CategoricalPlotter(object):
 
     width = .8
 
     def establish_variables(self, x=None, y=None, hue=None, data=None,
                             orient=None, order=None, hue_order=None,
-                            units=None):
+                            units=None, weights=None):
         """Convert input specification into a common representation."""
         # Option 1:
         # We are plotting a wide-form dataset
@@ -79,6 +89,11 @@ class _CategoricalPlotter(object):
                 iter_data = plot_data.iteritems()
                 plot_data = [np.asarray(s, np.float) for k, s in iter_data]
 
+                if weights is None:
+                    wgt_data = None
+                else:
+                    wgt_data = [weights, ]
+
             # Option 1b:
             # The input data is an array or list
             # ----------------------------------
@@ -125,6 +140,11 @@ class _CategoricalPlotter(object):
                 # Convert to a list of arrays, the common representation
                 plot_data = [np.asarray(d, np.float) for d in plot_data]
 
+                if weights is None:
+                    wgt_data = None
+                else:
+                    wgt_data = [weights, ]
+
                 # The group names will just be numeric indices
                 group_names = list(range((len(plot_data))))
 
@@ -143,9 +163,10 @@ class _CategoricalPlotter(object):
                 y = data.get(y, y)
                 hue = data.get(hue, hue)
                 units = data.get(units, units)
+                weights = data.get(weights, weights)
 
             # Validate the inputs
-            for input in [x, y, hue, units]:
+            for input in [x, y, hue, units, weights]:
                 if isinstance(input, string_types):
                     err = "Could not interpret input '{}'".format(input)
                     raise ValueError(err)
@@ -179,6 +200,11 @@ class _CategoricalPlotter(object):
                 hue_title = None
                 plot_units = None
 
+                if weights is None:
+                    wgt_data = None
+                else:
+                    wgt_data = [weights, ]
+
             # Option 2b:
             # We are grouping the data values by another variable
             # ---------------------------------------------------
@@ -201,6 +227,15 @@ class _CategoricalPlotter(object):
                 # Group the numeric data
                 plot_data, value_label = self._group_longform(vals, groups,
                                                               group_names)
+
+                # Handle the weight data
+                if weights is None:
+                    wgt_data = None
+
+                else:
+                    # Group the weight data
+                    wgt_data, _ = self._group_longform(weights, groups,
+                                                     group_names)
 
                 # Now handle the hue levels for nested ordering
                 if hue is None:
@@ -234,6 +269,7 @@ class _CategoricalPlotter(object):
         self.hue_title = hue_title
         self.hue_names = hue_names
         self.plot_units = plot_units
+        self.wgt_data = wgt_data
 
     def _group_longform(self, vals, grouper, order):
         """Group a long-form variable by another with correct order."""
@@ -428,9 +464,10 @@ class _BoxPlotter(_CategoricalPlotter):
 
     def __init__(self, x, y, hue, data, order, hue_order,
                  orient, color, palette, saturation,
-                 width, dodge, fliersize, linewidth):
+                 width, dodge, fliersize, linewidth, weights):
 
-        self.establish_variables(x, y, hue, data, orient, order, hue_order)
+        self.establish_variables(x, y, hue, data, orient, order,
+                                 hue_order, weights=weights)
         self.establish_colors(color, palette, saturation)
 
         self.dodge = dodge
@@ -449,7 +486,12 @@ class _BoxPlotter(_CategoricalPlotter):
         for obj in ["box", "whisker", "cap", "median", "flier"]:
             props[obj] = kws.pop(obj + "props", {})
 
-        for i, group_data in enumerate(self.plot_data):
+        # Ensure weight data is compatible even if not used
+        if self.wgt_data is None:
+            self.wgt_data = [None, ] * len(self.plot_data)
+
+        for i, (group_data, group_wgts) in enumerate(zip(
+                self.plot_data, self.wgt_data)):
 
             if self.plot_hues is None:
 
@@ -459,20 +501,41 @@ class _BoxPlotter(_CategoricalPlotter):
 
                 # Draw a single box or a set of boxes
                 # with a single level of grouping
-                box_data = remove_na(group_data)
+                if group_wgts is None:
+                    box_data = remove_na(group_data)
+                    wgt_data = None
+
+                else:
+                    box_data, wgt_data = remove_na_wgts(group_data, group_wgts)
 
                 # Handle case where there is no non-null data
                 if box_data.size == 0:
                     continue
 
-                artist_dict = ax.boxplot(box_data,
+                if wgt_data is None:
+                    artist_dict = ax.boxplot(box_data,
+                                             vert=vert,
+                                             patch_artist=True,
+                                             positions=[i],
+                                             widths=self.width,
+                                             **kws)
+
+                else:
+                    box_data = self.boxplot_stats(box_data, wgt_data, **kws)
+                    _kws = kws.copy()
+                    _kws.pop('whis')
+                    _kws.pop('notch')
+                    artist_dict = ax.bxp(box_data,
                                          vert=vert,
                                          patch_artist=True,
-                                         positions=[i],
+                                         positions=[i, ],
                                          widths=self.width,
-                                         **kws)
+                                         **_kws
+                                         )
+
                 color = self.colors[i]
                 self.restyle_boxplot(artist_dict, color, props)
+
             else:
                 # Draw nested groups of boxes
                 offsets = self.hue_offsets
@@ -487,21 +550,69 @@ class _BoxPlotter(_CategoricalPlotter):
                         continue
 
                     hue_mask = self.plot_hues[i] == hue_level
-                    box_data = remove_na(group_data[hue_mask])
+
+                    if group_wgts is None:
+                        box_data = remove_na(group_data[hue_mask])
+
+                    else:
+                        box_data, wgt_data = remove_na_wgts(
+                                group_data[hue_mask], group_wgts[hue_mask])
 
                     # Handle case where there is no non-null data
                     if box_data.size == 0:
                         continue
 
                     center = i + offsets[j]
-                    artist_dict = ax.boxplot(box_data,
+
+                    if group_wgts is None:
+                        artist_dict = ax.boxplot(box_data,
+                                                 vert=vert,
+                                                 patch_artist=True,
+                                                 positions=[center],
+                                                 widths=self.nested_width,
+                                                 **kws)
+
+                    else:
+                        box_data = self.boxplot_stats(box_data, wgt_data, **kws)
+                        _kws = kws.copy()
+                        _kws.pop('whis')
+                        _kws.pop('notch')
+                        artist_dict = ax.bxp(box_data,
                                              vert=vert,
                                              patch_artist=True,
-                                             positions=[center],
+                                             positions=[center, ],
                                              widths=self.nested_width,
-                                             **kws)
+                                             **_kws
+                                             )
+
                     self.restyle_boxplot(artist_dict, self.colors[j], props)
                     # Add legend data, but just for one set of boxes
+
+    def boxplot_stats(self, values, weights, whis=1.5, **kws):
+        item = {}
+        df = pd.DataFrame({'vals':values, 'wgt':weights})
+        df['wgt'] *= df['vals']
+        df.sort_values('vals', inplace=True)
+        df['pct'] = df['wgt'].cumsum() / df['wgt'].sum()
+        q1 = df['vals'].values[np.argwhere(df['pct'] >= 0.25)][0]
+        q3 = df['vals'].values[np.argwhere(df['pct'] <= 0.75)][-1]
+        med = df['vals'].values[np.argwhere(df['pct'] <= 0.5)][-1]
+        iqr = (q3 - q1)[0]
+        uw = (q3 + iqr * whis)[0]
+        lw = max(0, (q1 - iqr * whis)[0])
+
+        item['label'] = ''  # values.name
+        item['mean'] = (values * weights).sum() / weights.sum()
+        item['med'] = med
+        item['q1'] = q1
+        item['q3'] = q3
+        item['whislo'] = lw
+        item['whishi'] = uw
+
+        m = (df['vals'] > uw) | (df['vals'] < lw)
+        item['fliers'] = df.loc[m, 'vals'].values
+
+        return [item, ]
 
     def restyle_boxplot(self, artist_dict, color, props):
         """Take a drawn matplotlib boxplot and make it look nice."""
@@ -1805,10 +1916,10 @@ class _LVPlotter(_CategoricalPlotter):
                 raise ValueError('outlier_prop not in range [0, 1]!')
             p = outlier_prop
         # Select the depth, i.e. number of boxes to draw, based on the method
-        k_dict = {'proportion': (np.log2(n)) - int(np.log2(n*p)) + 1,
+        k_dict = {'proportion': (np.log2(n)) - int(np.log2(n * p)) + 1,
                   'tukey': (np.log2(n)) - 3,
                   'trustworthy': (np.log2(n) -
-                                  np.log2(2*stats.norm.ppf((1-p))**2)) + 1}
+                                  np.log2(2 * stats.norm.ppf((1 - p)) ** 2)) + 1}
         k = k_dict[k_depth]
         try:
             k = int(k)
@@ -1818,9 +1929,9 @@ class _LVPlotter(_CategoricalPlotter):
         if k < 1.:
             k = 1
         # Calculate the upper box ends
-        upper = [100*(1 - 0.5**(i+2)) for i in range(k, -1, -1)]
+        upper = [100 * (1 - 0.5 ** (i + 2)) for i in range(k, -1, -1)]
         # Calculate the lower box ends
-        lower = [100*(0.5**(i+2)) for i in range(k, -1, -1)]
+        lower = [100 * (0.5 ** (i + 2)) for i in range(k, -1, -1)]
         # Stitch the box ends together
         percentile_ends = [(i, j) for i, j in zip(lower, upper)]
         box_ends = [np.percentile(vals, q) for q in percentile_ends]
@@ -1828,7 +1939,7 @@ class _LVPlotter(_CategoricalPlotter):
 
     def _lv_outliers(self, vals, k):
         """Find the outliers based on the letter value depth."""
-        perc_ends = (100*(0.5**(k+2)), 100*(1 - 0.5**(k+2)))
+        perc_ends = (100 * (0.5 ** (k + 2)), 100 * (1 - 0.5 ** (k + 2)))
         edges = np.percentile(vals, perc_ends)
         lower_out = vals[np.where(vals < edges[0])[0]]
         upper_out = vals[np.where(vals > edges[1])[0]]
@@ -1837,8 +1948,8 @@ class _LVPlotter(_CategoricalPlotter):
     def _width_functions(self, width_func):
         # Dictionary of functions for computing the width of the boxes
         width_functions = {'linear': lambda h, i, k: (i + 1.) / k,
-                           'exponential': lambda h, i, k: 2**(-k+i-1),
-                           'area': lambda h, i, k: (1 - 2**(-k+i-2)) / h}
+                           'exponential': lambda h, i, k: 2 ** (-k + i - 1),
+                           'area': lambda h, i, k: (1 - 2 ** (-k + i - 2)) / h}
         return width_functions[width_func]
 
     def _lvplot(self, box_data, positions,
@@ -1876,14 +1987,14 @@ class _LVPlotter(_CategoricalPlotter):
 
             # Functions to construct the letter value boxes
             def vert_perc_box(x, b, i, k, w):
-                rect = Patches.Rectangle((x - widths*w / 2, b[0]),
-                                         widths*w,
+                rect = Patches.Rectangle((x - widths * w / 2, b[0]),
+                                         widths * w,
                                          height(b), fill=True)
                 return rect
 
             def horz_perc_box(x, b, i, k, w):
-                rect = Patches.Rectangle((b[0], x - widths*w / 2),
-                                         height(b), widths*w,
+                rect = Patches.Rectangle((b[0], x - widths * w / 2),
+                                         height(b), widths * w,
                                          fill=True)
                 return rect
 
@@ -2156,7 +2267,7 @@ _categorical_docs.update(_facet_docs)
 def boxplot(x=None, y=None, hue=None, data=None, order=None, hue_order=None,
             orient=None, color=None, palette=None, saturation=.75,
             width=.8, dodge=True, fliersize=5, linewidth=None,
-            whis=1.5, notch=False, ax=None, **kwargs):
+            whis=1.5, notch=False, ax=None, weights=None, **kwargs):
 
     # Try to handle broken backwards-compatability
     # This should help with the lack of a smooth deprecation,
@@ -2200,7 +2311,8 @@ def boxplot(x=None, y=None, hue=None, data=None, order=None, hue_order=None,
 
     plotter = _BoxPlotter(x, y, hue, data, order, hue_order,
                           orient, color, palette, saturation,
-                          width, dodge, fliersize, linewidth)
+                          width, dodge, fliersize, linewidth,
+                          weights)
 
     if ax is None:
         ax = plt.gca()
